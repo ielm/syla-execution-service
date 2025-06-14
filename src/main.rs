@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 mod docker;
 mod error;
+mod executor;
+mod grpc;
 mod models;
 mod queue;
 mod state;
@@ -34,11 +36,15 @@ async fn main() -> Result<()> {
         .init();
 
     // Connect to Redis
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".to_string());
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380/".to_string());
     let redis_client = redis::Client::open(redis_url)?;
     let redis_conn = ConnectionManager::new(redis_client).await?;
 
-    // Initialize state
+    // Initialize components
+    let redis_queue = Arc::new(queue::RedisQueue::new(redis_conn.clone()));
+    let docker_executor = Arc::new(executor::DockerExecutor::new().await?);
+
+    // Initialize state for REST API
     let state = Arc::new(ServiceState {
         redis: Arc::new(Mutex::new(redis_conn)),
         docker_executor: Arc::new(docker::DockerExecutor::new()?),
@@ -50,7 +56,23 @@ async fn main() -> Result<()> {
         worker::run_worker(worker_state).await;
     });
 
-    // Build router
+    // Start gRPC server
+    let grpc_queue = redis_queue.clone();
+    let grpc_executor = docker_executor.clone();
+    tokio::spawn(async move {
+        let addr = "0.0.0.0:8081".parse().unwrap();
+        tracing::info!("Starting gRPC server on {}", addr);
+        
+        let service = grpc::server::ExecutionServiceImpl::new(grpc_queue, grpc_executor);
+        
+        tonic::transport::Server::builder()
+            .add_service(grpc::proto::syla::execution::v1::execution_service_server::ExecutionServiceServer::new(service))
+            .serve(addr)
+            .await
+            .expect("gRPC server failed");
+    });
+
+    // Build REST router
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/executions", post(create_execution))
@@ -58,13 +80,13 @@ async fn main() -> Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    // Start server
+    // Start REST server
     let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8082".to_string())
+        .unwrap_or_else(|_| "8083".to_string())
         .parse::<u16>()
         .expect("Invalid PORT");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("Starting execution service on {}", addr);
+    tracing::info!("Starting REST API on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

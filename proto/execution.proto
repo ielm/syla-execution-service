@@ -1,0 +1,292 @@
+syntax = "proto3";
+
+package syla.execution.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/any.proto";
+import "common/syla/common.proto";
+
+// Execution Service - Handles code execution orchestration
+service ExecutionService {
+    // Submit an execution request
+    rpc SubmitExecution(SubmitExecutionRequest) returns (SubmitExecutionResponse);
+    
+    // Get execution status and result
+    rpc GetExecution(GetExecutionRequest) returns (GetExecutionResponse);
+    
+    // Stream execution output in real-time
+    rpc StreamExecution(StreamExecutionRequest) returns (stream ExecutionEvent);
+    
+    // Cancel a running execution
+    rpc CancelExecution(CancelExecutionRequest) returns (CancelExecutionResponse);
+    
+    // List executions with filtering
+    rpc ListExecutions(ListExecutionsRequest) returns (ListExecutionsResponse);
+    
+    // Get execution metrics
+    rpc GetExecutionMetrics(GetExecutionMetricsRequest) returns (GetExecutionMetricsResponse);
+    
+    // Health check
+    rpc HealthCheck(syla.common.v1.HealthCheckRequest) returns (syla.common.v1.HealthCheckResponse);
+}
+
+// Execution request and configuration
+message ExecutionRequest {
+    string code = 1;
+    Language language = 2;
+    repeated string args = 3;
+    map<string, string> environment = 4;
+    ResourceRequirements resources = 5;
+    google.protobuf.Duration timeout = 6;
+    repeated string files = 7;  // Input files
+    ExecutionMode mode = 8;
+    map<string, string> metadata = 9;
+}
+
+message ResourceRequirements {
+    uint64 memory_mb = 1;
+    double cpu_cores = 2;
+    uint64 disk_mb = 3;
+    bool enable_network = 4;
+    bool enable_gpu = 5;
+}
+
+enum ExecutionMode {
+    EXECUTION_MODE_UNSPECIFIED = 0;
+    EXECUTION_MODE_SANDBOX = 1;      // Full isolation
+    EXECUTION_MODE_CONTAINER = 2;    // Container isolation
+    EXECUTION_MODE_PROCESS = 3;      // Process isolation (dev only)
+}
+
+enum Language {
+    LANGUAGE_UNSPECIFIED = 0;
+    LANGUAGE_PYTHON = 1;
+    LANGUAGE_JAVASCRIPT = 2;
+    LANGUAGE_TYPESCRIPT = 3;
+    LANGUAGE_RUST = 4;
+    LANGUAGE_GO = 5;
+    LANGUAGE_JAVA = 6;
+    LANGUAGE_CPP = 7;
+    LANGUAGE_CSHARP = 8;
+    LANGUAGE_RUBY = 9;
+    LANGUAGE_PHP = 10;
+    LANGUAGE_SHELL = 11;
+}
+
+// Execution state and result
+message Execution {
+    string id = 1;
+    string user_id = 2;
+    string workspace_id = 3;
+    ExecutionRequest request = 4;
+    ExecutionStatus status = 5;
+    ExecutionResult result = 6;
+    google.protobuf.Timestamp created_at = 7;
+    google.protobuf.Timestamp started_at = 8;
+    google.protobuf.Timestamp completed_at = 9;
+    string worker_id = 10;
+    ExecutionMetrics metrics = 11;
+}
+
+enum ExecutionStatus {
+    EXECUTION_STATUS_UNSPECIFIED = 0;
+    EXECUTION_STATUS_PENDING = 1;
+    EXECUTION_STATUS_QUEUED = 2;
+    EXECUTION_STATUS_PREPARING = 3;
+    EXECUTION_STATUS_RUNNING = 4;
+    EXECUTION_STATUS_COMPLETED = 5;
+    EXECUTION_STATUS_FAILED = 6;
+    EXECUTION_STATUS_CANCELLED = 7;
+    EXECUTION_STATUS_TIMEOUT = 8;
+}
+
+message ExecutionResult {
+    int32 exit_code = 1;
+    string stdout = 2;
+    string stderr = 3;
+    repeated OutputFile files = 4;
+    map<string, string> outputs = 5;
+    ExecutionError error = 6;
+}
+
+message OutputFile {
+    string path = 1;
+    bytes content = 2;
+    string mime_type = 3;
+    uint64 size_bytes = 4;
+}
+
+message ExecutionError {
+    string code = 1;
+    string message = 2;
+    string details = 3;
+    string stack_trace = 4;
+}
+
+message ExecutionMetrics {
+    google.protobuf.Duration queue_time = 1;
+    google.protobuf.Duration preparation_time = 2;
+    google.protobuf.Duration execution_time = 3;
+    uint64 memory_peak_mb = 4;
+    uint64 cpu_time_ms = 5;
+    uint64 disk_read_bytes = 6;
+    uint64 disk_write_bytes = 7;
+    uint64 network_rx_bytes = 8;
+    uint64 network_tx_bytes = 9;
+}
+
+// Streaming events
+message ExecutionEvent {
+    string execution_id = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    
+    oneof event {
+        StatusChangeEvent status_change = 3;
+        OutputEvent output = 4;
+        MetricsEvent metrics = 5;
+        ErrorEvent error = 6;
+    }
+}
+
+message StatusChangeEvent {
+    ExecutionStatus old_status = 1;
+    ExecutionStatus new_status = 2;
+    string message = 3;
+}
+
+message OutputEvent {
+    OutputType type = 1;
+    string data = 2;
+    uint32 sequence = 3;
+}
+
+enum OutputType {
+    OUTPUT_TYPE_UNSPECIFIED = 0;
+    OUTPUT_TYPE_STDOUT = 1;
+    OUTPUT_TYPE_STDERR = 2;
+    OUTPUT_TYPE_LOG = 3;
+}
+
+message MetricsEvent {
+    uint64 memory_used_mb = 1;
+    double cpu_percent = 2;
+    uint64 disk_used_bytes = 3;
+}
+
+message ErrorEvent {
+    string code = 1;
+    string message = 2;
+    bool fatal = 3;
+}
+
+// Request/Response messages
+message SubmitExecutionRequest {
+    syla.common.v1.ExecutionContext context = 1;
+    ExecutionRequest request = 2;
+    bool async = 3;  // Return immediately vs wait for completion
+}
+
+message SubmitExecutionResponse {
+    string execution_id = 1;
+    ExecutionStatus status = 2;
+    ExecutionResult result = 3;  // Only if sync and completed
+}
+
+message GetExecutionRequest {
+    string execution_id = 1;
+    bool include_output = 2;
+    bool include_metrics = 3;
+}
+
+message GetExecutionResponse {
+    Execution execution = 1;
+}
+
+message StreamExecutionRequest {
+    string execution_id = 1;
+    bool from_start = 2;  // Replay from beginning
+    uint32 last_sequence = 3;  // Resume from sequence
+}
+
+message CancelExecutionRequest {
+    string execution_id = 1;
+    bool force = 2;  // Force kill vs graceful
+    string reason = 3;
+}
+
+message CancelExecutionResponse {
+    bool success = 1;
+    ExecutionStatus final_status = 2;
+}
+
+message ListExecutionsRequest {
+    string user_id = 1;
+    string workspace_id = 2;
+    ExecutionStatus status = 3;
+    google.protobuf.Timestamp created_after = 4;
+    google.protobuf.Timestamp created_before = 5;
+    syla.common.v1.PageRequest page = 6;
+}
+
+message ListExecutionsResponse {
+    repeated Execution executions = 1;
+    syla.common.v1.PageResponse page = 2;
+}
+
+message GetExecutionMetricsRequest {
+    repeated string execution_ids = 1;
+    google.protobuf.Timestamp start_time = 2;
+    google.protobuf.Timestamp end_time = 3;
+    repeated string metric_names = 4;
+}
+
+message GetExecutionMetricsResponse {
+    map<string, ExecutionMetrics> metrics = 1;
+    AggregateMetrics aggregate = 2;
+}
+
+message AggregateMetrics {
+    uint32 total_executions = 1;
+    uint32 successful_executions = 2;
+    uint32 failed_executions = 3;
+    google.protobuf.Duration avg_execution_time = 4;
+    google.protobuf.Duration p50_execution_time = 5;
+    google.protobuf.Duration p95_execution_time = 6;
+    google.protobuf.Duration p99_execution_time = 7;
+    uint64 total_cpu_time_ms = 8;
+    uint64 total_memory_mb_seconds = 9;
+}
+
+// Worker management (internal)
+message WorkerInfo {
+    string id = 1;
+    string hostname = 2;
+    repeated Language supported_languages = 3;
+    ResourceCapacity capacity = 4;
+    ResourceUsage current_usage = 5;
+    WorkerStatus status = 6;
+    google.protobuf.Timestamp last_heartbeat = 7;
+}
+
+message ResourceCapacity {
+    uint32 max_concurrent_executions = 1;
+    uint64 total_memory_mb = 2;
+    uint32 total_cpu_cores = 3;
+    uint64 total_disk_mb = 4;
+}
+
+message ResourceUsage {
+    uint32 active_executions = 1;
+    uint64 used_memory_mb = 2;
+    double used_cpu_cores = 3;
+    uint64 used_disk_mb = 4;
+}
+
+enum WorkerStatus {
+    WORKER_STATUS_UNSPECIFIED = 0;
+    WORKER_STATUS_READY = 1;
+    WORKER_STATUS_BUSY = 2;
+    WORKER_STATUS_DRAINING = 3;
+    WORKER_STATUS_OFFLINE = 4;
+}
